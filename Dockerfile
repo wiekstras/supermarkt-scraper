@@ -6,11 +6,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o scraper . && chmod +x scraper
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o scraper .
 
 # Minimal final image
 FROM scratch
-COPY --from=builder /app/scraper /scraper
+COPY --from=builder --chmod=755 /app/scraper /scraper
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 EXPOSE 8080
 ENTRYPOINT ["/scraper"]
