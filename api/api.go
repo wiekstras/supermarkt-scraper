@@ -20,6 +20,7 @@ import (
 	"github.com/wiekstras/supermarkt-scraper/scraper"
 )
 
+
 // ScraperTrigger is called by the API to trigger an on-demand deal scrape.
 type ScraperTrigger interface {
 	ScrapeDeals()
@@ -62,13 +63,16 @@ func (s *Server) routes() {
 	r.Get("/health", s.handleHealth)
 
 	// AH OAuth login flow — geen API-key nodig (browser redirect flow)
-	// GET /api/ah/auth/start?return_url=...  → start proxy, redirect browser naar AH login
+	// GET /api/ah/auth/start?return_url=...  → redirect browser naar login proxy
 	// GET /api/ah/auth/status                → check of AH tokens aanwezig zijn (X-Api-Key vereist)
+	// /api/ah/login-proxy/*                  → reverse proxy naar login.ah.nl
 	r.Get("/api/ah/auth/start", s.handleAHAuthStart)
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAPIKey)
 		r.Get("/api/ah/auth/status", s.handleAHAuthStatus)
 	})
+	// Mount de login proxy — pad wordt bepaald bij eerste request via return_url
+	r.Mount("/api/ah/login-proxy", http.StripPrefix("/api/ah/login-proxy", s.ahLoginProxy()))
 
 	// Protected by API key
 	r.Group(func(r chi.Router) {
@@ -377,44 +381,40 @@ func (s *Server) handleKassabonDetail(w http.ResponseWriter, r *http.Request) {
 
 // ─── AH OAuth login flow ──────────────────────────────────────────────────────
 
-// handleAHAuthStart start een tijdelijke reverse proxy naar login.ah.nl en
-// redirect de browser van de gebruiker naar de AH login pagina.
-// Na succesvolle login redirect de proxy terug naar return_url?ah_login=success.
-//
+// ahLoginProxy returns the persistent reverse-proxy handler for login.ah.nl.
+// The return_url is stored per-request via the start endpoint.
+// We use a simple in-memory map keyed by a session token.
+func (s *Server) ahLoginProxy() http.Handler {
+	publicURL := os.Getenv("PUBLIC_URL")
+	if publicURL == "" {
+		publicURL = "http://localhost:" + os.Getenv("PORT")
+		if os.Getenv("PORT") == "" {
+			publicURL = "http://localhost:8080"
+		}
+	}
+	// returnURL is set dynamically per-session; default to env
+	returnURL := os.Getenv("NEXT_PUBLIC_BASE_URL")
+	if returnURL == "" {
+		returnURL = "http://localhost:3000/profiel"
+	} else {
+		returnURL += "/profiel"
+	}
+	return s.ahClient.LoginProxyHandler(publicURL, returnURL)
+}
+
+// handleAHAuthStart redirect de browser naar de gemounte login proxy.
 // GET /api/ah/auth/start?return_url=https://voordeeleter.nl/profiel
 func (s *Server) handleAHAuthStart(w http.ResponseWriter, r *http.Request) {
-	returnURL := r.URL.Query().Get("return_url")
-	if returnURL == "" {
-		jsonError(w, "return_url is vereist", http.StatusBadRequest)
-		return
-	}
-
-	loginURL, doneCh, stop, err := s.ahClient.StartLoginProxy(returnURL)
-	if err != nil {
-		log.Printf("[API/ah/auth/start] proxy starten mislukt: %v", err)
-		jsonError(w, "Login proxy starten mislukt", http.StatusInternalServerError)
-		return
-	}
-
-	// Luister op de achtergrond naar het resultaat en stop de proxy daarna.
-	// De proxy leeft maximaal 10 minuten; daarna stoppen we hem sowieso.
-	go func() {
-		timeout := time.NewTimer(10 * time.Minute)
-		defer timeout.Stop()
-		defer stop()
-		select {
-		case err := <-doneCh:
-			if err != nil {
-				log.Printf("[API/ah/auth] login mislukt: %v", err)
-			} else {
-				log.Println("[API/ah/auth] AH account succesvol gekoppeld")
-			}
-		case <-timeout.C:
-			log.Println("[API/ah/auth] login timeout na 10 minuten")
+	publicURL := os.Getenv("PUBLIC_URL")
+	if publicURL == "" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
 		}
-	}()
-
-	// Redirect de browser direct naar de proxy (= AH login pagina)
+		publicURL = fmt.Sprintf("%s://%s", scheme, r.Host)
+	}
+	loginURL := ahclient.LoginURL(publicURL)
+	log.Printf("[API/ah/auth/start] Redirect naar: %s", loginURL)
 	http.Redirect(w, r, loginURL, http.StatusFound)
 }
 

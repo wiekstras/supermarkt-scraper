@@ -24,63 +24,54 @@ const loginSuccessPage = `<!DOCTYPE html>
 <script>setTimeout(function(){window.close()},500)</script>
 </body></html>`
 
-// StartLoginProxy start een tijdelijke reverse proxy naar login.ah.nl en geeft
-// de login URL terug zonder een browser te openen. Wanneer de gebruiker zijn
-// browser naar loginURL stuurt, de login doorloopt en de OAuth callback
-// ontvangt, worden de tokens opgeslagen in de TokenStore en wordt returnURL
-// aangeroepen (als HTTP redirect in de proxy).
+// LoginProxyHandler returns an http.Handler that acts as a reverse proxy to
+// login.ah.nl. Mount it at /api/ah/login-proxy on your main server.
 //
-// returnURL is de URL waar de proxy naartoe redirect na een succesvolle login,
-// bijv. "https://voordeeleter.nl/profiel?ah_login=success".
+// publicBaseURL: externally reachable base of the Go service,
 //
-// Stop() beëindigt de proxy server (roep altijd aan, ook na succes).
-// De done channel ontvangt één keer een fout (of nil bij succes).
-func (c *Client) StartLoginProxy(returnURL string) (loginURL string, done <-chan error, stop func(), err error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("StartLoginProxy: lokale server starten mislukt: %w", err)
-	}
-
-	localOrigin := fmt.Sprintf("http://%s", listener.Addr().String())
-	doneCh := make(chan error, 1)
-
+//	e.g. "https://supermarkt-scraper-production.up.railway.app"
+//
+// returnURL: where the browser goes after successful login,
+//
+//	e.g. "https://voordeeleter.nl/profiel"
+func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler {
 	loginBaseURL := "https://login.ah.nl"
-	target, parseErr := url.Parse(loginBaseURL)
-	if parseErr != nil {
-		listener.Close()
-		return "", nil, nil, fmt.Errorf("StartLoginProxy: ongeldige login URL: %w", parseErr)
-	}
+	target, _ := url.Parse(loginBaseURL)
+	proxyOrigin := strings.TrimRight(publicBaseURL, "/") + "/api/ah/login-proxy"
 
 	mux := http.NewServeMux()
+
+	// Callback: AH redirects here after login (appie:// → /callback)
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code == "" {
-			doneCh <- fmt.Errorf("lege authorization code ontvangen")
 			http.Redirect(w, r, returnURL+"?ah_login=error&reden=geen_code", http.StatusFound)
 			return
 		}
-		// Tokens inwisselen in de achtergrond; redirect de browser nu al
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := c.exchangeCode(ctx, code); err != nil {
-				doneCh <- err
-				return
-			}
-			doneCh <- nil
-		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := c.exchangeCode(ctx, code); err != nil {
+			http.Redirect(w, r, returnURL+"?ah_login=error&reden=exchange_mislukt", http.StatusFound)
+			return
+		}
 		http.Redirect(w, r, returnURL+"?ah_login=success", http.StatusFound)
 	})
 
+	// Reverse proxy: everything else → login.ah.nl
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
+			// Strip the /api/ah/login-proxy prefix before forwarding
+			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api/ah/login-proxy")
+			if req.URL.Path == "" {
+				req.URL.Path = "/"
+			}
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
 			req.Header.Del("Accept-Encoding")
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			return rewriteLoginResponse(resp, localOrigin, target.Host)
+			return rewriteLoginResponse(resp, proxyOrigin, target.Host)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			http.Error(w, "proxy fout", http.StatusBadGateway)
@@ -88,32 +79,21 @@ func (c *Client) StartLoginProxy(returnURL string) (loginURL string, done <-chan
 	}
 	mux.Handle("/", proxy)
 
-	srv := &http.Server{Handler: mux}
-	go srv.Serve(listener) //nolint:errcheck
-
-	stopFn := func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdownCtx) //nolint:errcheck
-	}
-
-	proxyLoginURL := fmt.Sprintf(
-		"%s/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
-		localOrigin, ClientID,
-	)
-	return proxyLoginURL, doneCh, stopFn, nil
+	return mux
 }
 
-// Login voert de volledige browser-login flow uit voor AH.
-// Het start een lokale reverse proxy naar login.ah.nl, opent de browser van
-// de gebruiker, wacht op de authorization code callback en wisselt die in
-// voor access + refresh tokens. Tokens worden opgeslagen in de TokenStore.
-//
-// Annuleer de context om de login flow af te breken.
-//
-// Deze methode is alleen nodig voor endpoints die een ingelogde gebruiker
-// vereisen (kassabonnen, persoonlijke data). Voor product search en koopjes
-// volstaat een anonymous token.
+// LoginURL returns the URL the browser should visit to start the AH OAuth flow.
+// publicBaseURL is the externally reachable base URL of the Go service.
+func LoginURL(publicBaseURL string) string {
+	base := strings.TrimRight(publicBaseURL, "/")
+	return fmt.Sprintf(
+		"%s/api/ah/login-proxy/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
+		base, ClientID,
+	)
+}
+
+// Login voert de volledige browser-login flow uit via een lokale proxy.
+// Alleen voor CLI gebruik (cmd/ah-login). Op Railway gebruik LoginProxyHandler.
 func (c *Client) Login(ctx context.Context) error {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -123,6 +103,13 @@ func (c *Client) Login(ctx context.Context) error {
 	localOrigin := fmt.Sprintf("http://%s", listener.Addr().String())
 	codeCh := make(chan string, 1)
 
+	loginBaseURL := "https://login.ah.nl"
+	target, err := url.Parse(loginBaseURL)
+	if err != nil {
+		listener.Close()
+		return fmt.Errorf("login: ongeldige login URL: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
@@ -130,13 +117,6 @@ func (c *Client) Login(ctx context.Context) error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(w, loginSuccessPage) //nolint:errcheck
 	})
-
-	loginBaseURL := "https://login.ah.nl"
-	target, err := url.Parse(loginBaseURL)
-	if err != nil {
-		listener.Close()
-		return fmt.Errorf("login: ongeldige login URL: %w", err)
-	}
 
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -156,7 +136,6 @@ func (c *Client) Login(ctx context.Context) error {
 
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(listener) //nolint:errcheck
-
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -167,7 +146,7 @@ func (c *Client) Login(ctx context.Context) error {
 		"%s/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
 		localOrigin, ClientID,
 	)
-	fmt.Printf("\n[AH Login] Open deze URL in je browser als hij niet automatisch opent:\n%s\n\n", loginURL)
+	fmt.Printf("\n[AH Login] Open deze URL in je browser:\n%s\n\n", loginURL)
 	openBrowser(loginURL)
 
 	select {
@@ -199,11 +178,9 @@ func (c *Client) exchangeCode(ctx context.Context, code string) error {
 	c.expiresAt = exp
 	c.mu.Unlock()
 
-	// Sla zowel access als refresh token op in de store
 	if c.tokenStore != nil {
 		_ = c.tokenStore.SaveToken(ctx, "ah_access_token", tok.AccessToken, exp)
 		if tok.RefreshToken != "" {
-			// Refresh tokens zijn doorgaans langer geldig (~30 dagen)
 			_ = c.tokenStore.SaveToken(ctx, "ah_refresh_token", tok.RefreshToken,
 				time.Now().Add(30*24*time.Hour))
 		}
@@ -211,17 +188,16 @@ func (c *Client) exchangeCode(ctx context.Context, code string) error {
 	return nil
 }
 
-// IsAuthenticated returns true if an access token is present (anonymous or logged in).
+// IsAuthenticated returns true if an access token is present.
 func (c *Client) IsAuthenticated() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.accessToken != ""
 }
 
-// ─── Login reverse-proxy helpers ──────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-func rewriteLoginResponse(resp *http.Response, localOrigin, targetHost string) error {
-	// Intercept server-side redirects naar appie://
+func rewriteLoginResponse(resp *http.Response, proxyOrigin, targetHost string) error {
 	if loc := resp.Header.Get("Location"); loc != "" {
 		if strings.HasPrefix(loc, "appie://") {
 			u, err := url.Parse(loc)
@@ -229,22 +205,19 @@ func rewriteLoginResponse(resp *http.Response, localOrigin, targetHost string) e
 				return fmt.Errorf("ongeldige appie URL %q: %w", loc, err)
 			}
 			resp.Header.Set("Location",
-				fmt.Sprintf("%s/callback?%s", localOrigin, u.RawQuery))
+				fmt.Sprintf("%s/callback?%s", proxyOrigin, u.RawQuery))
 			return nil
 		}
 		if strings.Contains(loc, targetHost) {
 			resp.Header.Set("Location",
-				strings.ReplaceAll(loc, "https://"+targetHost, localOrigin))
+				strings.ReplaceAll(loc, "https://"+targetHost, proxyOrigin))
 		}
 	}
 
-	// Verwijder security headers die de proxy zouden blokkeren
 	resp.Header.Del("Content-Security-Policy")
 	resp.Header.Del("Strict-Transport-Security")
 	resp.Header.Del("X-Frame-Options")
 
-	// Herschrijf cookies: verwijder Secure/SameSite/Domain zodat ze werken
-	// over plain HTTP op 127.0.0.1
 	if cookies := resp.Header.Values("Set-Cookie"); len(cookies) > 0 {
 		resp.Header.Del("Set-Cookie")
 		for _, cookie := range cookies {
@@ -252,7 +225,6 @@ func rewriteLoginResponse(resp *http.Response, localOrigin, targetHost string) e
 		}
 	}
 
-	// Herschrijf alleen text response bodies
 	ct := resp.Header.Get("Content-Type")
 	if !strings.Contains(ct, "text/html") &&
 		!strings.Contains(ct, "javascript") &&
@@ -265,8 +237,8 @@ func rewriteLoginResponse(resp *http.Response, localOrigin, targetHost string) e
 		return err
 	}
 
-	body = bytes.ReplaceAll(body, []byte("appie://login-exit"), []byte(localOrigin+"/callback"))
-	body = bytes.ReplaceAll(body, []byte("https://"+targetHost), []byte(localOrigin))
+	body = bytes.ReplaceAll(body, []byte("appie://login-exit"), []byte(proxyOrigin+"/callback"))
+	body = bytes.ReplaceAll(body, []byte("https://"+targetHost), []byte(proxyOrigin))
 
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
@@ -275,8 +247,6 @@ func rewriteLoginResponse(resp *http.Response, localOrigin, targetHost string) e
 	return nil
 }
 
-// sanitizeCookie strips Secure, SameSite en Domain attributen zodat de cookie
-// werkt over plain HTTP op localhost.
 func sanitizeCookie(cookie string) string {
 	parts := strings.Split(cookie, ";")
 	out := parts[:1]
