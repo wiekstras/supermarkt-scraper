@@ -1,0 +1,16 @@
+FROM golang:1.23-alpine AS builder
+WORKDIR /app
+
+# Download deps first (cached layer)
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o scraper .
+
+# Minimal final image
+FROM scratch
+COPY --from=builder /app/scraper /scraper
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+EXPOSE 8080
+ENTRYPOINT ["/scraper"]

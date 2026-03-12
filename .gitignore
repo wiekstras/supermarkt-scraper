@@ -1,0 +1,16 @@
+# Environment variables (never commit secrets)
+.env
+.env.local
+.env.*.local
+
+# Compiled binaries
+supermarkt-scraper
+ah-login
+run.sh
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
