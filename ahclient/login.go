@@ -94,8 +94,9 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 // publicBaseURL is the externally reachable base URL of the Go service.
 func LoginURL(publicBaseURL string) string {
 	base := strings.TrimRight(publicBaseURL, "/")
+	// AH's login app has basePath="/login", actual page is /login/login
 	return fmt.Sprintf(
-		"%s/api/ah/login-proxy/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
+		"%s/api/ah/login-proxy/login/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
 		base, ClientID,
 	)
 }

@@ -417,8 +417,9 @@ func (s *Server) handleAHAuthStart(w http.ResponseWriter, r *http.Request) {
 		}
 		base = fmt.Sprintf("%s://%s", scheme, r.Host)
 	}
+	// AH's login app has basePath="/login", so the actual page is at /login/login
 	loginURL := fmt.Sprintf(
-		"%s/api/ah/login-proxy/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
+		"%s/api/ah/login-proxy/login/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
 		base, ahclient.ClientID,
 	)
 	log.Printf("[API/ah/auth/start] Redirect naar login proxy: %s", loginURL)
