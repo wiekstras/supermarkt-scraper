@@ -9,8 +9,9 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o scraper .
 
 # Minimal final image
-FROM scratch
-COPY --from=builder --chmod=755 /app/scraper /scraper
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+FROM alpine:3.19
+RUN apk --no-cache add ca-certificates
+COPY --from=builder /app/scraper /scraper
+RUN chmod +x /scraper
 EXPOSE 8080
 ENTRYPOINT ["/scraper"]
