@@ -50,13 +50,26 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 	// proxyOrigin is what the browser sees — used to rewrite URLs in responses
 	proxyOrigin := strings.TrimRight(publicBaseURL, "/") + "/api/ah/login-proxy"
 
+	// mountPrefix is the path chi mounts this handler at. We must strip it
+	// ourselves because chi's r.Mount strips it from r.URL.Path but
+	// httputil.ReverseProxy reads the original RequestURI, not r.URL.Path.
+	// We detect it by checking if the path still contains the prefix.
+	mountPrefix := "/api/ah/login-proxy"
+
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
+			// Strip the mount prefix if chi didn't already strip it
+			if strings.HasPrefix(req.URL.Path, mountPrefix) {
+				req.URL.Path = strings.TrimPrefix(req.URL.Path, mountPrefix)
+				if req.URL.Path == "" {
+					req.URL.Path = "/"
+				}
+				req.URL.RawPath = ""
+			}
 			// AH (Akamai) requires browser-like headers — without them it returns 404.
-			// Set them explicitly since the request comes from our server, not the browser.
 			req.Header.Del("Accept-Encoding") // let Go handle decompression
 			if req.Header.Get("User-Agent") == "" {
 				req.Header.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
@@ -80,9 +93,13 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 	}
 
 	// Use a single HandlerFunc instead of ServeMux to avoid Go's path matching issues.
-	// chi r.Mount already strips the /api/ah/login-proxy prefix.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/callback" {
+		// Strip mount prefix if still present (chi doesn't always strip it for sub-paths)
+		path := strings.TrimPrefix(r.URL.Path, mountPrefix)
+		if path == "" {
+			path = "/"
+		}
+		if path == "/callback" {
 			code := r.URL.Query().Get("code")
 			if code == "" {
 				http.Redirect(w, r, returnURL+"?ah_login=error&reden=geen_code", http.StatusFound)
