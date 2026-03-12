@@ -80,6 +80,15 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 			if req.Header.Get("Accept-Language") == "" {
 				req.Header.Set("Accept-Language", "nl-NL,nl;q=0.9,en;q=0.8")
 			}
+			// Rewrite Origin and Referer so AH's backend accepts the request.
+			// The browser sends our proxy URL; AH expects login.ah.nl.
+			loginOrigin := "https://" + target.Host
+			if origin := req.Header.Get("Origin"); origin != "" {
+				req.Header.Set("Origin", loginOrigin)
+			}
+			if referer := req.Header.Get("Referer"); referer != "" {
+				req.Header.Set("Referer", strings.ReplaceAll(referer, proxyOrigin, loginOrigin))
+			}
 			log.Printf("[AH proxy] >> %s %s", req.Method, req.URL.Path)
 		},
 		ModifyResponse: func(resp *http.Response) error {
