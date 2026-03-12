@@ -160,6 +160,34 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 }
 
+// LoginWithPassword logs in directly with AH username and password.
+// No browser or OAuth flow needed — uses the mobile app API directly.
+func (c *Client) LoginWithPassword(ctx context.Context, username, password string) error {
+	body := map[string]string{
+		"clientId": ClientID,
+		"username": username,
+		"password": password,
+	}
+	var tok tokenResponse
+	if err := c.doRequest(ctx, http.MethodPost, "/mobile-auth/v1/auth/token", body, &tok); err != nil {
+		return fmt.Errorf("LoginWithPassword: %w", err)
+	}
+	exp := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
+	c.mu.Lock()
+	c.accessToken = tok.AccessToken
+	c.refreshToken = tok.RefreshToken
+	c.expiresAt = exp
+	c.mu.Unlock()
+	if c.tokenStore != nil {
+		_ = c.tokenStore.SaveToken(ctx, "ah_access_token", tok.AccessToken, exp)
+		if tok.RefreshToken != "" {
+			_ = c.tokenStore.SaveToken(ctx, "ah_refresh_token", tok.RefreshToken,
+				time.Now().Add(30*24*time.Hour))
+		}
+	}
+	return nil
+}
+
 // ExchangeCode wisselt een authorization code in voor tokens en slaat ze op.
 func (c *Client) ExchangeCode(ctx context.Context, code string) error {
 	return c.exchangeCode(ctx, code)
