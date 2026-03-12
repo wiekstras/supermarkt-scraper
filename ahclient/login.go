@@ -48,28 +48,6 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 	// proxyOrigin is what the browser sees — used to rewrite URLs in responses
 	proxyOrigin := strings.TrimRight(publicBaseURL, "/") + "/api/ah/login-proxy"
 
-	mux := http.NewServeMux()
-
-	// /callback — receives the authorization code after AH login
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			http.Redirect(w, r, returnURL+"?ah_login=error&reden=geen_code", http.StatusFound)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := c.exchangeCode(ctx, code); err != nil {
-			log.Printf("[AH proxy] exchangeCode mislukt: %v", err)
-			http.Redirect(w, r, returnURL+"?ah_login=error&reden=exchange_mislukt", http.StatusFound)
-			return
-		}
-		log.Println("[AH proxy] Login geslaagd, tokens opgeslagen")
-		http.Redirect(w, r, returnURL+"?ah_login=success", http.StatusFound)
-	})
-
-	// Everything else → reverse proxy to login.ah.nl
-	// Note: chi r.Mount strips the prefix, so paths here are already relative
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
@@ -87,9 +65,29 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 			http.Error(w, "proxy fout", http.StatusBadGateway)
 		},
 	}
-	mux.Handle("/", proxy)
 
-	return mux
+	// Use a single HandlerFunc instead of ServeMux to avoid Go's path matching issues.
+	// chi r.Mount already strips the /api/ah/login-proxy prefix.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/callback" {
+			code := r.URL.Query().Get("code")
+			if code == "" {
+				http.Redirect(w, r, returnURL+"?ah_login=error&reden=geen_code", http.StatusFound)
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := c.exchangeCode(ctx, code); err != nil {
+				log.Printf("[AH proxy] exchangeCode mislukt: %v", err)
+				http.Redirect(w, r, returnURL+"?ah_login=error&reden=exchange_mislukt", http.StatusFound)
+				return
+			}
+			log.Println("[AH proxy] Login geslaagd, tokens opgeslagen")
+			http.Redirect(w, r, returnURL+"?ah_login=success", http.StatusFound)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
 }
 
 // LoginURL returns the URL the browser should visit to start the AH OAuth flow.
