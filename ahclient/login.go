@@ -69,19 +69,8 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 				}
 				req.URL.RawPath = ""
 			}
-			// AH (Akamai) requires browser-like headers — without them it returns 404.
 			req.Header.Del("Accept-Encoding") // let Go handle decompression
-			if req.Header.Get("User-Agent") == "" {
-				req.Header.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
-			}
-			if req.Header.Get("Accept") == "" {
-				req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-			}
-			if req.Header.Get("Accept-Language") == "" {
-				req.Header.Set("Accept-Language", "nl-NL,nl;q=0.9,en;q=0.8")
-			}
 			// Rewrite Origin and Referer so AH's backend accepts the request.
-			// The browser sends our proxy URL; AH expects login.ah.nl.
 			loginOrigin := "https://" + target.Host
 			if origin := req.Header.Get("Origin"); origin != "" {
 				req.Header.Set("Origin", loginOrigin)
@@ -89,7 +78,14 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 			if referer := req.Header.Get("Referer"); referer != "" {
 				req.Header.Set("Referer", strings.ReplaceAll(referer, proxyOrigin, loginOrigin))
 			}
-			log.Printf("[AH proxy] >> %s %s", req.Method, req.URL.Path)
+			// Remove headers that reveal this is a proxy / datacenter request
+			req.Header.Del("X-Forwarded-For")
+			req.Header.Del("X-Forwarded-Host")
+			req.Header.Del("X-Forwarded-Proto")
+			req.Header.Del("X-Real-Ip")
+			req.Header.Del("Forwarded")
+			req.Header.Del("Via")
+			log.Printf("[AH proxy] >> %s %s UA=%s", req.Method, req.URL.Path, req.Header.Get("User-Agent"))
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			log.Printf("[AH proxy] << %d %s", resp.StatusCode, resp.Request.URL.Path)
