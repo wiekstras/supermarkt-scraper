@@ -452,8 +452,14 @@ document.getElementById('form').addEventListener('submit', async function(e) {
   btn.textContent = 'Bezig...';
   btn.disabled = true;
   err.style.display = 'none';
-  const data = new FormData(this);
-  const res = await fetch('/api/ah/auth/login', { method: 'POST', body: data });
+  const username = document.getElementById('email').value;
+  const password = document.getElementById('pass').value;
+  const return_url = this.querySelector('[name=return_url]').value;
+  const res = await fetch('/api/ah/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, return_url })
+  });
   const json = await res.json();
   if (json.ok) {
     window.location.href = json.redirect;
@@ -470,15 +476,21 @@ document.getElementById('form').addEventListener('submit', async function(e) {
 }
 
 // handleAHLogin verwerkt het login formulier.
-// POST /api/ah/auth/login  (form: username, password, return_url)
+// POST /api/ah/auth/login  (JSON: username, password, return_url)
 func (s *Server) handleAHLogin(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		jsonError(w, "Ongeldig formulier", http.StatusBadRequest)
+	var body struct {
+		Username  string `json:"username"`
+		Password  string `json:"password"`
+		ReturnURL string `json:"return_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "Ongeldig verzoek"})
 		return
 	}
-	username := strings.TrimSpace(r.FormValue("username"))
-	password := r.FormValue("password")
-	returnURL := r.FormValue("return_url")
+	username := strings.TrimSpace(body.Username)
+	password := body.Password
+	returnURL := body.ReturnURL
 	if returnURL == "" {
 		returnURL = os.Getenv("NEXT_PUBLIC_BASE_URL") + "/profiel"
 	}
