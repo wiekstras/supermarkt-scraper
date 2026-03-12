@@ -62,12 +62,12 @@ func (s *Server) routes() {
 	// Public
 	r.Get("/health", s.handleHealth)
 
-	// AH login flow — simpel login formulier met gebruikersnaam/wachtwoord
-	// GET  /api/ah/auth/start?return_url=...  → toon login formulier
-	// POST /api/ah/auth/login                 → verwerk login
+	// AH login flow — reverse proxy naar login.ah.nl
+	// GET  /api/ah/auth/start?return_url=...  → redirect naar proxy login URL
+	// /api/ah/login-proxy/*                   → reverse proxy naar login.ah.nl
 	// GET  /api/ah/auth/status                → check of AH tokens aanwezig zijn (X-Api-Key vereist)
 	r.Get("/api/ah/auth/start", s.handleAHAuthStart)
-	r.Post("/api/ah/auth/login", s.handleAHLogin)
+	r.Mount("/api/ah/login-proxy", s.ahLoginProxyHandler())
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAPIKey)
 		r.Get("/api/ah/auth/status", s.handleAHAuthStatus)
@@ -392,134 +392,37 @@ func publicURL(r *http.Request) string {
 	return fmt.Sprintf("%s://%s", scheme, r.Host)
 }
 
-// handleAHAuthStart toont een simpel login formulier voor AH.
-// GET /api/ah/auth/start?return_url=https://voordeeleter.nl/profiel
-func (s *Server) handleAHAuthStart(w http.ResponseWriter, r *http.Request) {
-	returnURL := r.URL.Query().Get("return_url")
-	if returnURL == "" {
-		returnURL = os.Getenv("NEXT_PUBLIC_BASE_URL") + "/profiel"
+// ahLoginProxyHandler mounts a reverse proxy to login.ah.nl at /api/ah/login-proxy.
+// The proxy runs on the public HTTPS Railway URL so cookies work correctly.
+func (s *Server) ahLoginProxyHandler() http.Handler {
+	base := strings.TrimRight(os.Getenv("PUBLIC_URL"), "/")
+	if base == "" {
+		base = "https://supermarkt-scraper-production.up.railway.app"
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html lang="nl">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Inloggen bij Albert Heijn</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-  .card { background: white; border-radius: 12px; padding: 32px; width: 100%%; max-width: 400px; box-shadow: 0 2px 16px rgba(0,0,0,0.1); }
-  .logo { text-align: center; margin-bottom: 24px; }
-  .logo span { font-size: 32px; }
-  h1 { font-size: 20px; font-weight: 700; color: #1a1a1a; margin-bottom: 4px; text-align: center; }
-  p.sub { font-size: 14px; color: #666; text-align: center; margin-bottom: 24px; }
-  label { display: block; font-size: 13px; font-weight: 500; color: #444; margin-bottom: 6px; }
-  input { width: 100%%; padding: 10px 14px; border: 1.5px solid #ddd; border-radius: 8px; font-size: 15px; outline: none; transition: border-color 0.2s; }
-  input:focus { border-color: #00a346; }
-  .field { margin-bottom: 16px; }
-  button { width: 100%%; padding: 12px; background: #00a346; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 8px; }
-  button:hover { background: #008a3c; }
-  .error { background: #fff0f0; border: 1px solid #ffcdd2; color: #c62828; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
-  .note { font-size: 12px; color: #999; text-align: center; margin-top: 16px; }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="logo"><span>🛒</span></div>
-  <h1>Inloggen bij Albert Heijn</h1>
-  <p class="sub">Koppel je AH-account aan Voordeeleter</p>
-  <div class="error" id="err"></div>
-  <form id="form">
-    <input type="hidden" name="return_url" value="%s">
-    <div class="field">
-      <label for="email">E-mailadres</label>
-      <input type="email" id="email" name="username" placeholder="jouw@email.nl" required autofocus>
-    </div>
-    <div class="field">
-      <label for="pass">Wachtwoord</label>
-      <input type="password" id="pass" name="password" placeholder="••••••••" required>
-    </div>
-    <button type="submit" id="btn">Inloggen</button>
-  </form>
-  <p class="note">Je gegevens worden alleen gebruikt om je kassabonnen op te halen.</p>
-</div>
-<script>
-document.getElementById('form').addEventListener('submit', async function(e) {
-  e.preventDefault();
-  const btn = document.getElementById('btn');
-  const err = document.getElementById('err');
-  btn.textContent = 'Bezig...';
-  btn.disabled = true;
-  err.style.display = 'none';
-  const username = document.getElementById('email').value;
-  const password = document.getElementById('pass').value;
-  const return_url = this.querySelector('[name=return_url]').value;
-  const res = await fetch('/api/ah/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password, return_url })
-  });
-  const json = await res.json();
-  if (json.ok) {
-    window.location.href = json.redirect;
-  } else {
-    err.textContent = json.error || 'Inloggen mislukt. Controleer je gegevens.';
-    err.style.display = 'block';
-    btn.textContent = 'Inloggen';
-    btn.disabled = false;
-  }
-});
-</script>
-</body>
-</html>`, returnURL)
+	returnURL := strings.TrimRight(os.Getenv("NEXT_PUBLIC_BASE_URL"), "/") + "/profiel"
+	if os.Getenv("NEXT_PUBLIC_BASE_URL") == "" {
+		returnURL = "http://localhost:3000/profiel"
+	}
+	return s.ahClient.LoginProxyHandler(base, returnURL)
 }
 
-// handleAHLogin verwerkt het login formulier.
-// POST /api/ah/auth/login  (JSON: username, password, return_url)
-func (s *Server) handleAHLogin(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Username  string `json:"username"`
-		Password  string `json:"password"`
-		ReturnURL string `json:"return_url"`
+// handleAHAuthStart redirect de browser naar de login proxy.
+// GET /api/ah/auth/start?return_url=https://voordeeleter.nl/profiel
+func (s *Server) handleAHAuthStart(w http.ResponseWriter, r *http.Request) {
+	base := strings.TrimRight(os.Getenv("PUBLIC_URL"), "/")
+	if base == "" {
+		scheme := "https"
+		if r.Header.Get("X-Forwarded-Proto") == "http" {
+			scheme = "http"
+		}
+		base = fmt.Sprintf("%s://%s", scheme, r.Host)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "Ongeldig verzoek"})
-		return
-	}
-	username := strings.TrimSpace(body.Username)
-	password := body.Password
-	returnURL := body.ReturnURL
-	if returnURL == "" {
-		returnURL = os.Getenv("NEXT_PUBLIC_BASE_URL") + "/profiel"
-	}
-
-	if username == "" || password == "" {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "E-mailadres en wachtwoord zijn verplicht"})
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-
-	if err := s.ahClient.LoginWithPassword(ctx, username, password); err != nil {
-		log.Printf("[API/ah/auth/login] Login mislukt voor %s: %v", username, err)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":    false,
-			"error": "Inloggen mislukt. Controleer je e-mailadres en wachtwoord.",
-		})
-		return
-	}
-
-	log.Printf("[API/ah/auth/login] AH account gekoppeld: %s", username)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"ok":       true,
-		"redirect": returnURL + "?ah_login=success",
-	})
+	loginURL := fmt.Sprintf(
+		"%s/api/ah/login-proxy/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
+		base, ahclient.ClientID,
+	)
+	log.Printf("[API/ah/auth/start] Redirect naar login proxy: %s", loginURL)
+	http.Redirect(w, r, loginURL, http.StatusFound)
 }
 
 // handleAHAuthStatus geeft aan of er een geldig AH access token in de DB staat.

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -34,14 +35,22 @@ const loginSuccessPage = `<!DOCTYPE html>
 // returnURL: where the browser goes after successful login,
 //
 //	e.g. "https://voordeeleter.nl/profiel"
+// LoginProxyHandler returns an http.Handler that acts as a reverse proxy to
+// login.ah.nl — exactly like appie-go's Login() but mounted on the public
+// server instead of a local port.
+//
+// Mount at /api/ah/login-proxy. The browser navigates to:
+//
+//	{publicBaseURL}/api/ah/login-proxy/login?client_id=appie-ios&response_type=code&redirect_uri=appie://login-exit
 func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler {
 	loginBaseURL := "https://login.ah.nl"
 	target, _ := url.Parse(loginBaseURL)
+	// proxyOrigin is what the browser sees — used to rewrite URLs in responses
 	proxyOrigin := strings.TrimRight(publicBaseURL, "/") + "/api/ah/login-proxy"
 
 	mux := http.NewServeMux()
 
-	// Callback: AH redirects here after login (appie:// → /callback)
+	// /callback — receives the authorization code after AH login
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code == "" {
@@ -51,29 +60,30 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := c.exchangeCode(ctx, code); err != nil {
+			log.Printf("[AH proxy] exchangeCode mislukt: %v", err)
 			http.Redirect(w, r, returnURL+"?ah_login=error&reden=exchange_mislukt", http.StatusFound)
 			return
 		}
+		log.Println("[AH proxy] Login geslaagd, tokens opgeslagen")
 		http.Redirect(w, r, returnURL+"?ah_login=success", http.StatusFound)
 	})
 
-	// Reverse proxy: everything else → login.ah.nl
+	// Everything else → reverse proxy to login.ah.nl
+	// Note: chi r.Mount strips the prefix, so paths here are already relative
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			// Strip the /api/ah/login-proxy prefix before forwarding
-			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api/ah/login-proxy")
-			if req.URL.Path == "" {
-				req.URL.Path = "/"
-			}
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
 			req.Header.Del("Accept-Encoding")
+			log.Printf("[AH proxy] >> %s %s", req.Method, req.URL.Path)
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			log.Printf("[AH proxy] << %d %s", resp.StatusCode, resp.Request.URL.Path)
 			return rewriteLoginResponse(resp, proxyOrigin, target.Host)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("[AH proxy] fout: %v", err)
 			http.Error(w, "proxy fout", http.StatusBadGateway)
 		},
 	}
