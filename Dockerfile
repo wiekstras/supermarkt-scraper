@@ -14,4 +14,4 @@ RUN apk --no-cache add ca-certificates
 COPY --from=builder /app/scraper /scraper
 RUN chmod +x /scraper
 EXPOSE 8080
-ENTRYPOINT ["/scraper"]
+CMD ["/scraper"]
