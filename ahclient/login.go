@@ -310,6 +310,13 @@ func rewriteLoginResponse(resp *http.Response, proxyOrigin, targetHost string) e
 
 	body = bytes.ReplaceAll(body, []byte("appie://login-exit"), []byte(proxyOrigin+"/callback"))
 	body = bytes.ReplaceAll(body, []byte("https://"+targetHost), []byte(proxyOrigin))
+	// AH's Next.js app uses basePath="/login", so all asset paths are relative: /login/_next/...
+	// The browser requests these directly from our server, so rewrite them to go through the proxy.
+	// e.g. src="/login/_next/..." → src="{proxyOrigin}/login/..."
+	// Note: proxyOrigin already ends with /api/ah/login-proxy, so assets become
+	// /api/ah/login-proxy/login/_next/... which the proxy forwards to login.ah.nl/login/_next/...
+	body = bytes.ReplaceAll(body, []byte("\"/login/"), []byte("\""+proxyOrigin+"/login/"))
+	body = bytes.ReplaceAll(body, []byte("'/login/"), []byte("'"+proxyOrigin+"/login/"))
 
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 	resp.ContentLength = int64(len(body))
