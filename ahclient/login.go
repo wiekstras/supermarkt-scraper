@@ -160,7 +160,12 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 }
 
-// exchangeCode wisselt een authorization code in voor tokens en slaat ze op.
+// ExchangeCode wisselt een authorization code in voor tokens en slaat ze op.
+func (c *Client) ExchangeCode(ctx context.Context, code string) error {
+	return c.exchangeCode(ctx, code)
+}
+
+// exchangeCode is de interne implementatie.
 func (c *Client) exchangeCode(ctx context.Context, code string) error {
 	body := map[string]string{
 		"clientId": ClientID,

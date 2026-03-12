@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -63,16 +64,15 @@ func (s *Server) routes() {
 	r.Get("/health", s.handleHealth)
 
 	// AH OAuth login flow — geen API-key nodig (browser redirect flow)
-	// GET /api/ah/auth/start?return_url=...  → redirect browser naar login proxy
+	// GET /api/ah/auth/start?return_url=...  → redirect browser naar login.ah.nl (echte site)
+	// GET /api/ah/callback?code=...          → OAuth callback, wisselt code in voor tokens
 	// GET /api/ah/auth/status                → check of AH tokens aanwezig zijn (X-Api-Key vereist)
-	// /api/ah/login-proxy/*                  → reverse proxy naar login.ah.nl
 	r.Get("/api/ah/auth/start", s.handleAHAuthStart)
+	r.Get("/api/ah/callback", s.handleAHCallback)
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAPIKey)
 		r.Get("/api/ah/auth/status", s.handleAHAuthStatus)
 	})
-	// Mount de login proxy — pad wordt bepaald bij eerste request via return_url
-	r.Mount("/api/ah/login-proxy", http.StripPrefix("/api/ah/login-proxy", s.ahLoginProxy()))
 
 	// Protected by API key
 	r.Group(func(r chi.Router) {
@@ -381,41 +381,64 @@ func (s *Server) handleKassabonDetail(w http.ResponseWriter, r *http.Request) {
 
 // ─── AH OAuth login flow ──────────────────────────────────────────────────────
 
-// ahLoginProxy returns the persistent reverse-proxy handler for login.ah.nl.
-// The return_url is stored per-request via the start endpoint.
-// We use a simple in-memory map keyed by a session token.
-func (s *Server) ahLoginProxy() http.Handler {
-	publicURL := os.Getenv("PUBLIC_URL")
-	if publicURL == "" {
-		publicURL = "http://localhost:" + os.Getenv("PORT")
-		if os.Getenv("PORT") == "" {
-			publicURL = "http://localhost:8080"
-		}
+// publicURL returns the externally reachable base URL of this service.
+func publicURL(r *http.Request) string {
+	if u := os.Getenv("PUBLIC_URL"); u != "" {
+		return strings.TrimRight(u, "/")
 	}
-	// returnURL is set dynamically per-session; default to env
-	returnURL := os.Getenv("NEXT_PUBLIC_BASE_URL")
-	if returnURL == "" {
-		returnURL = "http://localhost:3000/profiel"
-	} else {
-		returnURL += "/profiel"
+	scheme := "https"
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+		scheme = "http"
 	}
-	return s.ahClient.LoginProxyHandler(publicURL, returnURL)
+	return fmt.Sprintf("%s://%s", scheme, r.Host)
 }
 
-// handleAHAuthStart redirect de browser naar de gemounte login proxy.
+// handleAHAuthStart redirect de browser naar de echte AH login pagina.
+// De callback_uri wijst terug naar onze /api/ah/callback endpoint.
 // GET /api/ah/auth/start?return_url=https://voordeeleter.nl/profiel
 func (s *Server) handleAHAuthStart(w http.ResponseWriter, r *http.Request) {
-	publicURL := os.Getenv("PUBLIC_URL")
-	if publicURL == "" {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		publicURL = fmt.Sprintf("%s://%s", scheme, r.Host)
+	returnURL := r.URL.Query().Get("return_url")
+	if returnURL == "" {
+		returnURL = os.Getenv("NEXT_PUBLIC_BASE_URL") + "/profiel"
 	}
-	loginURL := ahclient.LoginURL(publicURL)
-	log.Printf("[API/ah/auth/start] Redirect naar: %s", loginURL)
+
+	base := publicURL(r)
+	callbackURI := base + "/api/ah/callback?return_url=" + url.QueryEscape(returnURL)
+
+	loginURL := fmt.Sprintf(
+		"https://login.ah.nl/secure/oauth/authorize?client_id=appie-android&response_type=code&redirect_uri=%s",
+		url.QueryEscape(callbackURI),
+	)
+	log.Printf("[API/ah/auth/start] Redirect naar AH login: %s", loginURL)
 	http.Redirect(w, r, loginURL, http.StatusFound)
+}
+
+// handleAHCallback ontvangt de OAuth callback van AH na succesvolle login.
+// GET /api/ah/callback?code=...&return_url=...
+func (s *Server) handleAHCallback(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	returnURL := r.URL.Query().Get("return_url")
+	if returnURL == "" {
+		returnURL = os.Getenv("NEXT_PUBLIC_BASE_URL") + "/profiel"
+	}
+
+	if code == "" {
+		log.Println("[API/ah/callback] Geen code ontvangen")
+		http.Redirect(w, r, returnURL+"?ah_login=error&reden=geen_code", http.StatusFound)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	if err := s.ahClient.ExchangeCode(ctx, code); err != nil {
+		log.Printf("[API/ah/callback] Code inwisselen mislukt: %v", err)
+		http.Redirect(w, r, returnURL+"?ah_login=error&reden=exchange_mislukt", http.StatusFound)
+		return
+	}
+
+	log.Println("[API/ah/callback] AH account succesvol gekoppeld")
+	http.Redirect(w, r, returnURL+"?ah_login=success", http.StatusFound)
 }
 
 // handleAHAuthStatus geeft aan of er een geldig AH access token in de DB staat.
