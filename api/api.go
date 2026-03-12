@@ -406,7 +406,9 @@ func (s *Server) ahLoginProxyHandler() http.Handler {
 	return s.ahClient.LoginProxyHandler(base, returnURL)
 }
 
-// handleAHAuthStart redirect de browser naar de login proxy.
+// handleAHAuthStart serveert een HTML-pagina met de AH login in een iframe.
+// De browser laadt login.ah.nl direct (geen server-side proxy nodig),
+// en we onderscheppen de appie:// callback via de iframe URL.
 // GET /api/ah/auth/start?return_url=https://voordeeleter.nl/profiel
 func (s *Server) handleAHAuthStart(w http.ResponseWriter, r *http.Request) {
 	base := strings.TrimRight(os.Getenv("PUBLIC_URL"), "/")
@@ -417,15 +419,147 @@ func (s *Server) handleAHAuthStart(w http.ResponseWriter, r *http.Request) {
 		}
 		base = fmt.Sprintf("%s://%s", scheme, r.Host)
 	}
-	// AH login: proxy is mounted at /api/ah/login-proxy, chi strips that prefix,
-	// so /api/ah/login-proxy/login → login.ah.nl/login (correct entry point)
-	loginURL := fmt.Sprintf(
-		"%s/api/ah/login-proxy/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
-		base, ahclient.ClientID,
+	returnURL := strings.TrimRight(os.Getenv("NEXT_PUBLIC_BASE_URL"), "/") + "/profiel"
+	if os.Getenv("NEXT_PUBLIC_BASE_URL") == "" {
+		returnURL = "http://localhost:3000/profiel"
+	}
+
+	// The callback URL that receives the code after login
+	callbackBase := base + "/api/ah/login-proxy/callback"
+
+	// Direct AH login URL — browser navigates to login.ah.nl directly (no proxy needed)
+	// redirect_uri=appie://login-exit is required by AH; we intercept it via JS
+	ahLoginURL := fmt.Sprintf(
+		"https://login.ah.nl/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
+		ahclient.ClientID,
 	)
-	log.Printf("[API/ah/auth/start] Redirect naar login proxy: %s", loginURL)
-	http.Redirect(w, r, loginURL, http.StatusFound)
+
+	log.Printf("[API/ah/auth/start] Serveer login pagina, callbackBase=%s", callbackBase)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, loginPageHTML, ahLoginURL, callbackBase, returnURL)
 }
+
+// loginPageHTML is the HTML page that embeds the AH login in an iframe.
+// After login, AH redirects to appie://login-exit?code=... — the browser
+// can't open that URL, so we detect the navigation failure and extract the code.
+const loginPageHTML = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inloggen bij Albert Heijn</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; background: #f5f5f5; }
+#frame-container { width: 100%%; height: 100vh; position: relative; }
+iframe { width: 100%%; height: 100%%; border: none; }
+#status { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: white; align-items: center; justify-content: center;
+  flex-direction: column; gap: 16px; font-size: 18px; }
+#status.visible { display: flex; }
+.spinner { width: 40px; height: 40px; border: 4px solid #eee;
+  border-top-color: #0056b3; border-radius: 50%%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="frame-container">
+  <iframe id="ah-frame" src="%s" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-top-navigation"></iframe>
+</div>
+<div id="status">
+  <div class="spinner"></div>
+  <p>Bezig met inloggen...</p>
+</div>
+<script>
+const CALLBACK_BASE = %q;
+const RETURN_URL = %q;
+
+// Poll the iframe's location — when AH redirects to appie://, the iframe
+// navigation fails and we can catch it via the error or unload event.
+const frame = document.getElementById('ah-frame');
+const status = document.getElementById('status');
+
+frame.addEventListener('load', function() {
+  try {
+    const frameURL = frame.contentWindow.location.href;
+    checkForCode(frameURL);
+  } catch(e) {
+    // Cross-origin — normal during login flow
+  }
+});
+
+// Also intercept navigation attempts to appie:// by monitoring beforeunload
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.appieCode) {
+    handleCode(e.data.appieCode);
+  }
+});
+
+// Inject a script into the iframe once it's on the login.ah.nl domain
+// to intercept the appie:// redirect before it happens
+frame.addEventListener('load', function() {
+  try {
+    const doc = frame.contentWindow.document;
+    const script = doc.createElement('script');
+    script.textContent = ` + "`" + `
+      // Intercept all link clicks and location changes for appie://
+      const origAssign = window.location.assign.bind(window.location);
+      const origReplace = window.location.replace.bind(window.location);
+      function interceptAppie(url) {
+        if (typeof url === 'string' && url.startsWith('appie://')) {
+          const u = new URL(url);
+          const code = u.searchParams.get('code');
+          if (code) {
+            window.parent.postMessage({ appieCode: code }, '*');
+            return true;
+          }
+        }
+        return false;
+      }
+      window.location.assign = function(url) {
+        if (!interceptAppie(url)) origAssign(url);
+      };
+      window.location.replace = function(url) {
+        if (!interceptAppie(url)) origReplace(url);
+      };
+      // Override href setter on location
+      const origHref = Object.getOwnPropertyDescriptor(window.location, 'href');
+    ` + "`" + `;
+    doc.head.appendChild(script);
+  } catch(e) {
+    // Cross-origin, can't inject — use fallback
+  }
+});
+
+function checkForCode(url) {
+  if (url && url.startsWith('appie://')) {
+    try {
+      const u = new URL(url);
+      const code = u.searchParams.get('code');
+      if (code) handleCode(code);
+    } catch(e) {}
+  }
+}
+
+function handleCode(code) {
+  status.classList.add('visible');
+  fetch(CALLBACK_BASE + '?code=' + encodeURIComponent(code))
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        window.location.href = RETURN_URL + '?ah_login=success';
+      } else {
+        window.location.href = RETURN_URL + '?ah_login=error&reden=exchange_mislukt';
+      }
+    })
+    .catch(() => {
+      window.location.href = RETURN_URL + '?ah_login=error&reden=exchange_mislukt';
+    });
+}
+</script>
+</body>
+</html>`
 
 // handleAHAuthStatus geeft aan of er een geldig AH access token in de DB staat.
 // GET /api/ah/auth/status

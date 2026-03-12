@@ -107,6 +107,13 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 		if path == "/callback" {
 			code := r.URL.Query().Get("code")
 			if code == "" {
+				// Called from JS fetch — return JSON
+				if r.Header.Get("Accept") == "application/json" || r.Header.Get("X-Requested-With") != "" {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					fmt.Fprintf(w, `{"ok":false,"error":"geen_code"}`)
+					return
+				}
 				http.Redirect(w, r, returnURL+"?ah_login=error&reden=geen_code", http.StatusFound)
 				return
 			}
@@ -114,11 +121,15 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 			defer cancel()
 			if err := c.exchangeCode(ctx, code); err != nil {
 				log.Printf("[AH proxy] exchangeCode mislukt: %v", err)
-				http.Redirect(w, r, returnURL+"?ah_login=error&reden=exchange_mislukt", http.StatusFound)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				fmt.Fprintf(w, `{"ok":false,"error":"exchange_mislukt"}`)
 				return
 			}
 			log.Println("[AH proxy] Login geslaagd, tokens opgeslagen")
-			http.Redirect(w, r, returnURL+"?ah_login=success", http.StatusFound)
+			// Return JSON for JS fetch calls, redirect for direct browser navigation
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"ok":true}`)
 			return
 		}
 		proxy.ServeHTTP(w, r)
