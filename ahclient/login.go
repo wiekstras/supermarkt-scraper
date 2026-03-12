@@ -55,7 +55,18 @@ func (c *Client) LoginProxyHandler(publicBaseURL, returnURL string) http.Handler
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
-			req.Header.Del("Accept-Encoding")
+			// AH (Akamai) requires browser-like headers — without them it returns 404.
+			// Set them explicitly since the request comes from our server, not the browser.
+			req.Header.Del("Accept-Encoding") // let Go handle decompression
+			if req.Header.Get("User-Agent") == "" {
+				req.Header.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+			}
+			if req.Header.Get("Accept") == "" {
+				req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+			}
+			if req.Header.Get("Accept-Language") == "" {
+				req.Header.Set("Accept-Language", "nl-NL,nl;q=0.9,en;q=0.8")
+			}
 			log.Printf("[AH proxy] >> %s %s", req.Method, req.URL.Path)
 		},
 		ModifyResponse: func(resp *http.Response) error {
