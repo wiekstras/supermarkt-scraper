@@ -1,4 +1,4 @@
-// supermarkt-scraper: standalone Go microservice for scraping AH, Jumbo and Poiesz.
+// supermarkt-scraper: standalone Go microservice for scraping AH, Jumbo, Poiesz and Lidl.
 // Exposes a REST API and runs a built-in cron scheduler.
 package main
 
@@ -13,6 +13,7 @@ import (
 	"github.com/wiekstras/supermarkt-scraper/scraper"
 	"github.com/wiekstras/supermarkt-scraper/scraper/ah"
 	"github.com/wiekstras/supermarkt-scraper/scraper/jumbo"
+	"github.com/wiekstras/supermarkt-scraper/scraper/lidl"
 	"github.com/wiekstras/supermarkt-scraper/scraper/poiesz"
 )
 
@@ -28,8 +29,9 @@ func main() {
 		ah.New(db.NewTokenStore()),
 		jumbo.New(),
 		poiesz.New(),
+		lidl.New(),
 	}
-	log.Printf("[main] %d stores geladen: ah, jumbo, poiesz", len(stores))
+	log.Printf("[main] %d stores geladen: ah, jumbo, poiesz, lidl", len(stores))
 
 	// ── Scheduler ────────────────────────────────────────────────────────────
 	sched := scheduler.New(stores)
