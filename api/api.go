@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -431,9 +430,6 @@ func (s *Server) handleAHAuthStart(w http.ResponseWriter, r *http.Request) {
 	// but the browser navigates to login.ah.nl directly (not via server-side proxy).
 	callbackBase := base + "/api/ah/login-proxy/callback"
 
-	// The intercept page URL — served by us, handles the appie:// redirect via JS
-	interceptURL := base + "/api/ah/auth/intercept?callback=" + url.QueryEscape(callbackBase) + "&return=" + url.QueryEscape(returnURL)
-
 	// AH login URL — opened directly in the browser, no server-side proxy
 	ahLoginURL := fmt.Sprintf(
 		"https://login.ah.nl/login?client_id=%s&response_type=code&redirect_uri=appie://login-exit",
@@ -442,7 +438,7 @@ func (s *Server) handleAHAuthStart(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[API/ah/auth/start] Serveer login wachtpagina")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, loginWaitPageHTML, ahLoginURL, interceptURL, returnURL)
+	fmt.Fprintf(w, loginWaitPageHTML, ahLoginURL, callbackBase, returnURL)
 }
 
 // handleAHAuthIntercept serveert de interceptpagina die de appie:// redirect opvangt.
@@ -457,7 +453,7 @@ func (s *Server) handleAHAuthIntercept(w http.ResponseWriter, r *http.Request) {
 }
 
 // loginWaitPageHTML opens login.ah.nl directly in a new window/tab.
-// %s = AH login URL, %s = intercept page URL, %s = return URL
+// loginWaitPageHTML: args are ahLoginURL, callbackBase, returnURL (all %q)
 const loginWaitPageHTML = `<!DOCTYPE html>
 <html>
 <head>
@@ -465,108 +461,92 @@ const loginWaitPageHTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Inloggen bij Albert Heijn</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: system-ui, sans-serif; background: #f5f5f5;
-  display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-.card { background: white; border-radius: 12px; padding: 40px; max-width: 420px;
-  width: 90%%; text-align: center; box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
-.logo { font-size: 48px; margin-bottom: 16px; }
-h1 { font-size: 22px; margin-bottom: 8px; color: #111; }
-p { color: #666; margin-bottom: 24px; line-height: 1.5; }
-button { background: #0056b3; color: white; border: none; border-radius: 8px;
-  padding: 14px 28px; font-size: 16px; cursor: pointer; width: 100%%; }
-button:hover { background: #004494; }
-.spinner { display: none; width: 32px; height: 32px; border: 3px solid #eee;
-  border-top-color: #0056b3; border-radius: 50%%; animation: spin 0.8s linear infinite;
-  margin: 0 auto 16px; }
-@keyframes spin { to { transform: rotate(360deg); } }
-#waiting { display: none; }
-#start { display: block; }
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:white;border-radius:12px;padding:40px;max-width:420px;width:90%%;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.1)}
+h1{font-size:22px;margin-bottom:12px;color:#111}
+p{color:#666;margin-bottom:24px;line-height:1.5}
+a.btn{display:block;background:#0056b3;color:white;text-decoration:none;border-radius:8px;padding:14px 28px;font-size:16px}
+a.btn:hover{background:#004494}
+.spinner{display:none;width:32px;height:32px;border:3px solid #eee;border-top-color:#0056b3;border-radius:50%%;animation:spin .8s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+#waiting{display:none}
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="logo">🛒</div>
   <div id="start">
     <h1>Koppel je AH account</h1>
-    <p>Klik op de knop om in te loggen bij Albert Heijn. Je wordt doorgestuurd naar de beveiligde AH inlogpagina.</p>
-    <button onclick="startLogin()">Inloggen bij Albert Heijn</button>
+    <p>Klik op de knop hieronder. Er opent een nieuw venster waar je kunt inloggen bij Albert Heijn.</p>
+    <a href="#" class="btn" id="login-btn">Inloggen bij Albert Heijn</a>
   </div>
   <div id="waiting">
     <div class="spinner" id="spinner"></div>
     <h1>Wachten op inloggen...</h1>
     <p id="wait-msg">Log in bij Albert Heijn in het geopende venster.</p>
-    <button onclick="startLogin()" style="background:#666;margin-top:16px">Opnieuw openen</button>
   </div>
 </div>
 <script>
-const AH_LOGIN_URL = %q;
-const INTERCEPT_URL = %q;
-const RETURN_URL = %q;
-let popup = null;
+var AH_LOGIN_URL = %q;
+var CALLBACK_URL = %q;
+var RETURN_URL = %q;
+var pollTimer = null;
 
-// Listen for the code from the popup or intercept page
-window.addEventListener('message', function(e) {
-  if (e.data && e.data.ahCode) {
-    document.getElementById('wait-msg').textContent = 'Bezig met inloggen...';
-    document.getElementById('spinner').style.display = 'block';
-    // Code already exchanged by intercept page — just redirect
-    if (e.data.ok) {
-      window.location.href = RETURN_URL + '?ah_login=success';
-    } else {
-      window.location.href = RETURN_URL + '?ah_login=error&reden=exchange_mislukt';
-    }
-  }
+document.getElementById('login-btn').addEventListener('click', function(e) {
+  e.preventDefault();
+  startLogin();
 });
 
 function startLogin() {
+  // Open popup directly in click handler to avoid browser popup blockers
+  var popup = window.open(AH_LOGIN_URL, 'ah-login', 'width=500,height=720,scrollbars=yes,resizable=yes');
+  if (!popup) {
+    alert('Popup geblokkeerd. Sta popups toe voor deze pagina en probeer opnieuw.');
+    return;
+  }
+
   document.getElementById('start').style.display = 'none';
   document.getElementById('waiting').style.display = 'block';
   document.getElementById('spinner').style.display = 'block';
 
-  // Open AH login page directly in a popup — no server-side proxy needed
-  // After login AH redirects to appie://login-exit?code=...
-  // The browser can't handle appie:// so it shows an error page.
-  // We detect this by monitoring the popup's URL via polling.
-  popup = window.open(AH_LOGIN_URL, 'ah-login', 'width=480,height=700,scrollbars=yes');
-
-  // Poll the popup location for appie:// redirect
-  const timer = setInterval(function() {
-    try {
-      if (!popup || popup.closed) {
-        clearInterval(timer);
-        document.getElementById('wait-msg').textContent = 'Venster gesloten. Klik opnieuw om te proberen.';
-        document.getElementById('spinner').style.display = 'none';
-        return;
+  // Poll popup location every 300ms.
+  // While on login.ah.nl we get a cross-origin error — that's fine, keep polling.
+  // When AH redirects to appie://login-exit?code=..., the browser can't handle
+  // the custom scheme and stays on it, so popup.location.href becomes readable.
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(function() {
+    if (!popup || popup.closed) {
+      clearInterval(pollTimer);
+      document.getElementById('wait-msg').textContent = 'Venster gesloten zonder inloggen.';
+      document.getElementById('spinner').style.display = 'none';
+      return;
+    }
+    var loc = '';
+    try { loc = popup.location.href; } catch(e) { return; }
+    if (loc && loc.indexOf('appie://') === 0) {
+      clearInterval(pollTimer);
+      popup.close();
+      // Extract code from appie://login-exit?code=XXX
+      var match = loc.match(/[?&]code=([^&]+)/);
+      if (match) {
+        exchangeCode(decodeURIComponent(match[1]));
+      } else {
+        window.location.href = RETURN_URL + '?ah_login=error&reden=geen_code';
       }
-      const loc = popup.location.href;
-      if (loc && loc.startsWith('appie://')) {
-        clearInterval(timer);
-        popup.close();
-        const u = new URL(loc);
-        const code = u.searchParams.get('code');
-        if (code) exchangeCode(code);
-      }
-    } catch(e) {
-      // Cross-origin while on login.ah.nl — normal, keep polling
     }
   }, 300);
 }
 
 function exchangeCode(code) {
   document.getElementById('wait-msg').textContent = 'Account koppelen...';
-  // Exchange the code via our Go backend
-  // Use the callback URL which handles code exchange
-  fetch(%q + '?code=' + encodeURIComponent(code))
-    .then(r => r.json())
-    .then(data => {
-      if (data.ok) {
-        window.location.href = RETURN_URL + '?ah_login=success';
-      } else {
-        window.location.href = RETURN_URL + '?ah_login=error&reden=exchange_mislukt';
-      }
+  fetch(CALLBACK_URL + '?code=' + encodeURIComponent(code))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      window.location.href = data.ok
+        ? RETURN_URL + '?ah_login=success'
+        : RETURN_URL + '?ah_login=error&reden=exchange_mislukt';
     })
-    .catch(() => {
+    .catch(function() {
       window.location.href = RETURN_URL + '?ah_login=error&reden=exchange_mislukt';
     });
 }
