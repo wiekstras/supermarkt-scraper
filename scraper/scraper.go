@@ -54,6 +54,7 @@ type Deal struct {
 	Eenheid        string  `json:"eenheid"`
 	Categorie      string  `json:"categorie"`
 	AfbeeldingUrl  string  `json:"afbeeldingUrl,omitempty"`
+	ProductUrl     string  `json:"productUrl,omitempty"`
 	GeldigTot      string  `json:"geldigTot"`
 }
 
