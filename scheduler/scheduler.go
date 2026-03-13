@@ -49,11 +49,13 @@ func (s *Scheduler) Stop() {
 
 // ScrapeDeals is also called directly from the API (POST /api/scrape/deals).
 func (s *Scheduler) ScrapeDeals() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
 	for _, store := range s.stores {
 		go func(st scraper.Store) {
+			// Each goroutine gets its own independent context so that one store
+			// timing out or completing does not cancel the others.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+
 			start := time.Now()
 			deals, err := st.HaalDealsOp(ctx)
 			if err != nil {

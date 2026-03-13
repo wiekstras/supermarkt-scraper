@@ -115,18 +115,19 @@ func (s *AldiStore) Zoek(ctx context.Context, query string) ([]scraper.PrijsResu
 			continue
 		}
 
-		// Aldi only shows prices for products that are currently in the weekly deal.
-		// For regular products priceValue is null — skip those since we can't compare.
-		if hit.CurrentPrice.PriceValue == nil {
-			continue
+		// Products without a price are regular non-deal items.
+		// Include them so the vergelijker can still show them, but mark prijs as 0.
+		// The frontend already handles prijs==0 by displaying "–".
+		prijs := 0.0
+		if hit.CurrentPrice.PriceValue != nil {
+			prijs = *hit.CurrentPrice.PriceValue
 		}
 
-		prijs := *hit.CurrentPrice.PriceValue
 		var actiePrijs *float64
 		inAanbieding := false
 		bonusTekst := ""
 
-		if hit.CurrentPrice.StrikePriceValue != nil && *hit.CurrentPrice.StrikePriceValue > prijs {
+		if hit.CurrentPrice.StrikePriceValue != nil && *hit.CurrentPrice.StrikePriceValue > prijs && prijs > 0 {
 			inAanbieding = true
 			v := prijs
 			actiePrijs = &v
@@ -165,9 +166,8 @@ func (s *AldiStore) Zoek(ctx context.Context, query string) ([]scraper.PrijsResu
 		})
 	}
 
-	if len(resultaten) == 0 {
-		return nil, fmt.Errorf("aldi zoek: geen producten met prijs gevonden voor %q", query)
-	}
+	// Return empty slice (not an error) when Aldi simply doesn't carry the product.
+	// The zoek endpoint treats an empty slice as "not found at this store" which is fine.
 	return resultaten, nil
 }
 
