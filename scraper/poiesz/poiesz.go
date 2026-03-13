@@ -263,9 +263,15 @@ func (o *poieszOffer) toDeal(catName string, defaultValidUntil string) scraper.D
 		geldigTot = now.AddDate(0, 0, daysUntilSunday).Format("2006-01-02")
 	}
 
-	img := imageURL(o.ImageFile, o.ID)
-	if img == "" && len(o.OverviewProducts) > 0 {
-		img = imageURL(o.OverviewProducts[0].Image, o.OverviewProducts[0].ID)
+	// o.ImageFile is a Windows PSD path (e.g. "files\0\6\5\120711.psd") —
+	// never a usable web URL. Use the first product image from overviewProducts
+	// instead, which contains a proper HTTPS URL or a relative filename.
+	img := ""
+	for _, p := range o.OverviewProducts {
+		if candidate := imageURL(p.Image, p.ID); candidate != "" {
+			img = candidate
+			break
+		}
 	}
 
 	categorie := scraper.MapCategorie(naam)
